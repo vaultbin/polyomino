@@ -47,7 +47,10 @@ button:disabled{opacity:.45;cursor:default}
 .piece .del{position:absolute;top:2px;right:2px;padding:2px 7px;border:none;background:none;color:var(--muted);font-size:1rem}
 .piece small{color:var(--muted);font-variant-numeric:tabular-nums}
 .empty{color:var(--muted);font-size:.9rem;grid-column:1/-1}
-.speed input[type=range]{flex:1;min-width:120px;accent-color:var(--accent)}
+.seg{display:flex;flex:1;border:1px solid var(--line);border-radius:10px;overflow:hidden}
+.seg button{flex:1;border:none;border-radius:0;background:var(--panel)}
+.seg button+button{border-left:1px solid var(--line)}
+.seg button[aria-pressed="true"]{background:var(--ink);color:var(--bg)}
 .actions{flex-wrap:nowrap}.actions button{flex:1;min-width:0;padding-inline:8px}
 #save{border-color:var(--accent);color:var(--accent)}
 .photo{display:flex;flex-direction:column;gap:10px}
@@ -66,12 +69,12 @@ button:disabled{opacity:.45;cursor:default}
 
   <section class="photo">
     <input id="file" type="file" accept="image/*" hidden>
+    <canvas id="preview" hidden></canvas>
+    <p id="photoNote" class="hint" hidden>Рамкою позначено знайдене поле, номерами — фігури. Якщо щось не так, виправ вручну нижче.</p>
     <div class="row actions">
       <button id="openPhoto" class="primary">Відкрити фото</button>
       <button id="hidePhoto" hidden>Сховати фото</button>
     </div>
-    <canvas id="preview" hidden></canvas>
-    <p id="photoNote" class="hint" hidden>Рамкою позначено знайдене поле, номерами — фігури. Якщо щось не так, виправ вручну нижче.</p>
   </section>
 
   <div class="row">
@@ -90,9 +93,11 @@ button:disabled{opacity:.45;cursor:default}
       <button id="back" hidden>Назад до малювання</button>
     </div>
     <div class="row speed">
-      <label for="speed">Швидкість</label>
-      <input id="speed" type="range" min="0" max="100" value="0">
-      <span id="speedVal" class="count"></span>
+      <label>Швидкість</label>
+      <div class="seg" role="group" aria-label="Швидкість">
+        <button id="modeSlow" type="button">Повільно</button>
+        <button id="modeFast" type="button">Моментально</button>
+      </div>
     </div>
   </section>
 
@@ -398,24 +403,32 @@ function backToEdit(){ if(run){cancelAnimationFrame(run.raf);run=null;} mode='ed
 $('back').onclick=()=>{ backToEdit(); setStatus(''); render(); };
 $('cancel').onclick=()=>{ backToEdit(); setStatus('Пошук зупинено.'); render(); };
 
-// speed: steps per animation frame (log slider) — 1 step ≈ one placement or one backtrack
-const speedSteps=()=>{const v=+$('speed').value; return v<=0?0:Math.round(Math.pow(10,v/25));};
-$('speed').oninput=()=>{const n=speedSteps(); $('speedVal').textContent = n===0 ? 'повільно' : n+' крок/кадр';};
-$('speed').oninput();
+// speed mode, remembered in this browser: 'slow' = one step every 120 ms, 'fast' = as fast as possible
+// (1 step = one piece placed or removed)
+let speedMode='slow';
+try{ const m=localStorage.getItem('polyomino.speed'); if(m==='slow'||m==='fast') speedMode=m; }catch{}
+function setMode(m){ speedMode=m;
+  $('modeSlow').setAttribute('aria-pressed',m==='slow'); $('modeFast').setAttribute('aria-pressed',m==='fast');
+  try{ localStorage.setItem('polyomino.speed',m); }catch{} }
+$('modeSlow').onclick=()=>setMode('slow'); $('modeFast').onclick=()=>setMode('fast');
+setMode(speedMode);
+const SLOW_MS=120;
 
 $('solve').onclick=()=>{
   const area=pieces.reduce((s,p)=>s+p.length,0);
   if(area>W*H) return setStatus(`Фігури займають ${area} клітинок, а в полі лише ${W*H}. Розв'язку немає.`,'bad');
   mode='solving'; grid.fill(false);
   const dlx=buildDLX(W,H,pieces);
-  run={...dlx, steps:0, back:0, t0:performance.now(), raf:0, acc:0};
+  run={...dlx, steps:0, back:0, t0:performance.now(), raf:0, last:0};
   solution=new Array(W*H).fill(-1); render();
   const draw=()=>{ solution.fill(-1); for(const ri of run.sol) for(const k of run.rows[ri].cells) solution[k]=run.rows[ri].piece; renderBoard(); };
   const tick=()=>{
     if(!run) return;
-    let n=speedSteps();
-    if(n===0){ run.acc++; if(run.acc<12){ run.raf=requestAnimationFrame(tick); return; } run.acc=0; n=1; }
+    let n;
+    if(speedMode==='fast'){ n=1e9; var deadline=performance.now()+12; }   // keep each frame under ~12 ms
+    else { const now=performance.now(); if(now-run.last<SLOW_MS){ run.raf=requestAnimationFrame(tick); return; } run.last=now; n=1; }
     for(let i=0;i<n;i++){
+      if(speedMode==='fast' && (i&255)===255 && performance.now()>deadline) break;
       const r=run.gen.next(); run.steps++;
       if(r.value==='remove'||r.value==='dead') run.back++;
       if(r.done){
@@ -467,7 +480,10 @@ $('file').onchange=async e=>{
   pieces=res.pieces.map(p=>p.cells); hues=res.pieces.map(p=>`rgb(${p.rgb.join(',')})`);
   buildBoard();
   const msg=`Знайдено поле ${W}×${H} і ${pieces.length} фігур (${res.area} клітинок).`;
+  if(res.area!==W*H){ setStatus(msg+' Площа фігур не дорівнює площі поля — перевір фото й фігури, потім натисни «Розв\'язати».','bad'); return; }
   setStatus(msg); $('solve').onclick();
+  const smooth=!matchMedia('(prefers-reduced-motion: reduce)').matches;
+  $('board').closest('.board-box').scrollIntoView({behavior:smooth?'smooth':'auto',block:'start'});
 };
 
 // example from the screenshot: level 31, 5x5 box, five pentominoes
