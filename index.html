@@ -55,6 +55,7 @@ button:disabled{opacity:.45;cursor:default}
 #save{border-color:var(--accent);color:var(--accent)}
 .photo{display:flex;flex-direction:column;gap:10px}
 #preview{max-width:100%;max-height:60vh;width:auto;align-self:center;border-radius:10px;border:1px solid var(--line)}
+body.dropping .wrap{outline:3px dashed var(--accent);outline-offset:6px;border-radius:12px}
 .hint{color:var(--muted);font-size:.85rem;margin:0}
 @media (prefers-reduced-motion:reduce){.c{transition:none}}
 </style>
@@ -75,6 +76,7 @@ button:disabled{opacity:.45;cursor:default}
       <button id="openPhoto" class="primary">Відкрити фото</button>
       <button id="hidePhoto" hidden>Сховати фото</button>
     </div>
+    <p class="hint">Або перетягни скріншот на сторінку (на iPhone — мініатюру, що з'являється після знімка), чи встав його з буфера.</p>
   </section>
 
   <div class="row">
@@ -194,7 +196,7 @@ function recognize(px, w, h) {
 
   // ---- cell size: try sizes, keep the one with the most confident cells ----
   let best = null;
-  for (let s = Math.round(w*0.08); s <= Math.round(w*0.16); s++) {
+  for (let s = Math.round(w*0.05); s <= Math.round(w*0.18); s++) {
     const pts = detect(s, 3);
     // reward cells that have a neighbour exactly one cell away — pieces are made of those
     let total = 0;
@@ -237,17 +239,40 @@ function recognize(px, w, h) {
   real.sort((a, b) => a.rect[1] - b.rect[1] || a.rect[0] - b.rect[0]);
   const area = real.reduce((a, p) => a + p.cells.length, 0);
 
-  let W, H;
-  if (box) {
-    W = Math.max(1, Math.round(box.bw / s)); H = Math.max(1, Math.round(box.bh / s));
-    if (W*H !== area) {
+  // ---- field size from the faint grid lines inside the box (cells there can be smaller than piece cells) ----
+  function gridCount(axis) {
+    const len = axis === 'x' ? box.bw : box.bh, across = axis === 'x' ? box.bh : box.bw;
+    const a0 = Math.round(across*0.08), a1 = Math.round(across*0.92), prof = new Float64Array(len);
+    for (let t = 0; t < len; t++) { let sm = 0;
+      for (let a = a0; a < a1; a++) { const i = axis === 'x' ? (box.y0+a)*w + box.x0+t : (box.y0+t)*w + box.x0+a; sm += R[i]+G[i]+B[i]; }
+      prof[t] = sm / (a1-a0); }
+    const d = new Float64Array(len);                       // how much darker than its surroundings
+    for (let t = 4; t < len-4; t++) { let m = 0; for (let k = -4; k <= 4; k++) if (Math.abs(k) > 1) m += prof[t+k]; d[t] = Math.max(0, m/6 - prof[t]); }
+    const srt = Array.from(d.slice(4, len-4)).sort((a, b) => a-b), med = srt[srt.length >> 1] + 0.5;
+    const sc = [];
+    for (let n = 2; n <= 20; n++) { const step = len/n; if (step < 6) break; let sm = 0;
+      for (let k = 1; k < n; k++) { const c = Math.round(k*step); let m = 0; for (let j = c-1; j <= c+1; j++) if (j > 3 && j < len-4) m = Math.max(m, d[j]); sm += m; }
+      sc.push([n, sm/(n-1)/med]); }
+    const top = Math.max(...sc.map(v => v[1]));
+    if (top < 4) return 0;                                 // no visible lines
+    // divisors of the true count also score high, multiples score about half: take the largest strong one
+    return Math.max(...sc.filter(v => v[1] >= top*0.6).map(v => v[0]));
+  }
+  let W = 0, H = 0, sizeFrom = 'grid';
+  if (box) { W = gridCount('x'); H = gridCount('y'); }
+  if (!W || !H) {
+    sizeFrom = 'cells';
+    if (box) { W = Math.max(1, Math.round(box.bw / s)); H = Math.max(1, Math.round(box.bh / s)); }
+    else { W = Math.ceil(Math.sqrt(area)); H = Math.ceil(area/W); }
+    if (box && W*H !== area) {
+      sizeFrom = 'area';
       const ratio = box.bw / box.bh; let bd = 1e9;
       for (let a = 1; a <= 20; a++) if (area % a === 0 && area/a <= 20) {
         const d = Math.abs(Math.log((a/(area/a))/ratio)); if (d < bd) { bd = d; W = a; H = area/a; }
       }
     }
-  } else { W = Math.ceil(Math.sqrt(area)); H = Math.ceil(area/W); }
-  return {W, H, s, pieces: real, box: box && [box.x0, box.y0, box.bw, box.bh], area, cells};
+  }
+  return {W, H, sizeFrom, s, pieces: real, box: box && [box.x0, box.y0, box.bw, box.bh], area, cells};
 }
 
 // ---------- DLX solver (Knuth's Algorithm X, Dancing Links), stepped visibly ----------
@@ -450,8 +475,20 @@ $('solve').onclick=()=>{
 // ---------- photo → board size + pieces → solve ----------
 $('openPhoto').onclick=()=>$('file').click();
 $('hidePhoto').onclick=()=>{ $('preview').hidden=$('photoNote').hidden=$('hidePhoto').hidden=true; };
-$('file').onchange=async e=>{
-  const f=e.target.files[0]; e.target.value=''; if(!f) return;
+$('file').onchange=e=>{ const f=e.target.files[0]; e.target.value=''; if(f) handleImage(f); };
+
+// drag & drop (e.g. the floating screenshot thumbnail on iPhone) and paste
+const imageFrom = list => [...(list||[])].map(x => x.kind==='file' ? x.getAsFile() : x).find(f => f && /^image\//.test(f.type));
+document.addEventListener('dragover', e=>{ e.preventDefault(); document.body.classList.add('dropping'); });
+document.addEventListener('dragleave', e=>{ if(!e.relatedTarget) document.body.classList.remove('dropping'); });
+document.addEventListener('drop', e=>{
+  e.preventDefault(); document.body.classList.remove('dropping');
+  const f = imageFrom(e.dataTransfer.items) || imageFrom(e.dataTransfer.files);
+  if(f) handleImage(f); else setStatus('Перетягни сюди саме зображення.','bad');
+});
+document.addEventListener('paste', e=>{ const f=imageFrom(e.clipboardData && e.clipboardData.items); if(f){ e.preventDefault(); handleImage(f); } });
+
+async function handleImage(f){
   backToEdit(); setStatus('Розпізнаю фото…');
   let img;
   try { img=await createImageBitmap(f); }
@@ -484,7 +521,7 @@ $('file').onchange=async e=>{
   setStatus(msg); $('solve').onclick();
   const smooth=!matchMedia('(prefers-reduced-motion: reduce)').matches;
   $('board').closest('.board-box').scrollIntoView({behavior:smooth?'smooth':'auto',block:'start'});
-};
+}
 
 // example from the screenshot: level 31, 5x5 box, five pentominoes
 $('example').onclick=()=>{
