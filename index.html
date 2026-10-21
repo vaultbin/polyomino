@@ -222,6 +222,27 @@ function recognize(px, w, h) {
   const groups = new Map();
   cells.forEach((c, i) => { const r = find(i); if (!groups.has(r)) groups.set(r, []); groups.get(r).push(c); });
 
+  // second pass: a cell whose outline is spoiled on one side (a button or glow right next to it)
+  // still belongs to the piece if every quarter of it has the piece's colour
+  const colAt = (x0, y0, x1, y1) => [mean(IR,x0,y0,x1,y1), mean(IG,x0,y0,x1,y1), mean(IB,x0,y0,x1,y1)];
+  for (const g of groups.values()) {
+    if (g.length < 2) continue;
+    const ref = [0,1,2].map(k => g.reduce((a, c) => a + c.c[k], 0) / g.length);
+    for (let qi = 0; qi < g.length; qi++) {
+      const c = g[qi];
+      for (const [dx, dy] of [[s,0],[-s,0],[0,s],[0,-s]]) {
+        const x = c.x + dx, y = c.y + dy;
+        if (x < s/2 || y < s/2 || x > w - s/2 || y > h - s/2) continue;
+        if (cells.some(o => Math.abs(o.x - x) < s*0.5 && Math.abs(o.y - y) < s*0.5)) continue;
+        const k = s*0.36, q = [[-k,-k,0,0],[0,-k,k,0],[-k,0,0,k],[0,0,k,k]];
+        if (q.every(([a,b,cc,d]) => cdist(colAt(x+a, y+b, x+cc, y+d), ref) < 30)) {
+          const nc = {x, y, v: 0, c: colAt(x-k, y-k, x+k, y+k)};
+          cells.push(nc); g.push(nc);
+        }
+      }
+    }
+  }
+
   const pieces = [];
   for (const g of groups.values()) {
     const ox = Math.min(...g.map(c => c.x)), oy = Math.min(...g.map(c => c.y));
